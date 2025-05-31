@@ -1,0 +1,100 @@
+import pandas as pd, os, json, textwrap, datetime, math
+
+
+science_questions = [
+    ("Ciências", "Qual é o planeta mais próximo do Sol?", "Mercúrio", "Vênus", "Terra", "Marte", "A", 1),
+    ("Ciências", "Qual elemento químico possui o símbolo O?", "Ouro", "Oxigênio", "Ósmio", "Ozônio", "B", 1),
+    ("Ciências", "Qual gás as plantas absorvem na fotossíntese?", "O2", "N2", "CO2", "CH4", "C", 2),
+    ("Ciências", "Qual força puxa objetos em direção à Terra?", "Magnetismo", "Gravidade", "Fricção", "Tensão", "B", 1),
+    ("Ciências", "Qual é a unidade de resistência elétrica?", "Watt", "Volt", "Ampere", "Ohm", "D", 2),
+    ("Ciências", "Qual é o maior planeta do Sistema Solar?", "Terra", "Júpiter", "Saturno", "Urano", "B", 2),
+    ("Ciências", "Qual processo do ciclo da água libera vapor pelas plantas?", "Evaporação", "Transpiração", "Condensação", "Precipitação", "B", 3),
+    ("Ciências", "Qual é o menor osso do corpo humano?", "Martelo", "Estribo", "Bigorna", "Fêmur", "B", 3),
+    ("Ciências", "Quem propôs a teoria da relatividade?", "Newton", "Einstein", "Galileu", "Maxwell", "B", 1),
+    ("Ciências", "Qual tipo sanguíneo é doador universal?", "O−", "AB+", "A+", "B−", "A", 2),
+    ("Ciências", "Em qual camada da atmosfera está a maior parte do ozônio?", "Troposfera", "Estratosfera", "Mesosfera", "Termosfera", "B", 3),
+    ("Ciências", "Qual é a velocidade da luz no vácuo (aprox.)?", "3×10^8 m/s", "1,5×10^8 m/s", "3×10^6 m/s", "1,5×10^6 m/s", "A", 4),
+    ("Ciências", "Qual é o nome científico dos humanos modernos?", "Homo habilis", "Homo erectus", "Homo sapiens", "Homo neanderthalensis", "C", 1),
+    ("Ciências", "Qual valor de pH é considerado neutro a 25 °C?", "5", "7", "9", "11", "B", 1),
+    ("Ciências", "Que instrumento mede a pressão atmosférica?", "Barômetro", "Anemômetro", "Higrômetro", "Termômetro", "A", 2),
+    ("Ciências", "Qual processo de divisão celular ocorre em células somáticas?", "Mitose", "Meiose", "Fissão", "Plasmólise", "A", 2),
+    ("Ciências", "Qual partícula subatômica não possui carga elétrica?", "Próton", "Elétron", "Nêutron", "Posítron", "C", 2),
+    ("Ciências", "Que instrumento mede terremotos?", "Sismógrafo", "Barômetro", "Telescópio", "Acelerômetro", "A", 2),
+    ("Ciências", "Qual fenômeno separa a luz branca em um prisma?", "Difração", "Refração", "Dispersão", "Reflexão", "C", 4),
+    ("Ciências", "Qual é o valor aproximado da constante de Avogadro?", "6,02×10^23", "3,14×10^10", "9,81×10^2", "1,60×10^−19", "A", 5),
+]
+
+history_questions = [
+    ("História", "Em que ano ocorreu a queda da Bastilha?", "1776", "1789", "1812", "1848", "B", 2),
+    ("História", "Quem foi o primeiro imperador romano?", "Júlio César", "Augusto", "Nero", "Trajano", "B", 3),
+    ("História", "Qual civilização construiu Machu Picchu?", "Maya", "Asteca", "Inca", "Olmeca", "C", 1),
+    ("História", "Em que século ocorreu a Revolução Industrial?", "XV", "XVI", "XVIII", "XIX", "C", 2),
+    ("História", "Quem liderou a marcha do sal na Índia em 1930?", "Jawaharlal Nehru", "Subhas Chandra Bose", "Mahatma Gandhi", "Bhagat Singh", "C", 3),
+    ("História", "Qual tratado encerrou a Primeira Guerra Mundial?", "Versalhes", "Tordesilhas", "Utrecht", "Paris", "A", 2),
+    ("História", "Qual imperador brasileiro aboliu a escravidão?", "Dom Pedro I", "Dom Pedro II", "Juscelino Kubitschek", "Getúlio Vargas", "B", 1),
+    ("História", "Quem foi a primeira mulher a ganhar o Nobel?", "Marie Curie", "Florence Nightingale", "Ada Lovelace", "Rosalind Franklin", "A", 1),
+    ("História", "Qual navegação completou a primeira volta ao mundo?", "Santa Maria", "Victoria", "Endeavour", "Beagle", "B", 4),
+    ("História", "Em que ano o Muro de Berlim caiu?", "1987", "1988", "1989", "1990", "C", 1),
+    ("História", "Qual civilização inventou a escrita cuneiforme?", "Egípcia", "Suméria", "Fenícia", "Grega", "B", 3),
+    ("História", "Quem pintou o afresco 'A Escola de Atenas'?", "Leonardo da Vinci", "Rafael", "Michelangelo", "Botticelli", "B", 2),
+    ("História", "Qual rainha inglesa foi chamada de 'Rainha Virgem'?", "Maria I", "Elizabeth I", "Victoria", "Anne", "B", 2),
+    ("História", "Em que batalha Napoleão foi definitivamente derrotado?", "Austerlitz", "Waterloo", "Borodino", "Leipzig", "B", 3),
+    ("História", "Qual cidade foi bombardeada com a primeira bomba atômica?", "Nagasaki", "Hiroshima", "Tóquio", "Osaka", "B", 1),
+    ("História", "Quem foi o faraó associado à pirâmide de Quéops?", "Tutancâmon", "Khufu", "Ramsés II", "Akhenaton", "B", 4),
+    ("História", "O que marca o início da Idade Média?", "Queda de Roma", "Descoberta da América", "Reforma Protestante", "Revolução Francesa", "A", 2),
+    ("História", "Quem foi o primeiro presidente dos EUA?", "John Adams", "Thomas Jefferson", "George Washington", "James Madison", "C", 1),
+    ("História", "Em qual ano ocorreu a conferência de Berlim que dividiu a África?", "1815", "1884", "1919", "1933", "B", 5),
+    ("História", "Qual era o nome oficial da União Soviética?", "RSSU", "URSS", "Rússia", "CIS", "B", 1),
+]
+
+math_questions = [
+    ("Matemática", "Quanto é 7 + 8?", "13", "14", "15", "16", "C", 1),
+    ("Matemática", "Quanto é 12 × 12?", "124", "142", "144", "154", "C", 1),
+    ("Matemática", "Qual é a raiz quadrada de 256?", "14", "15", "16", "18", "C", 2),
+    ("Matemática", "Quanto é 10 elevado à 3?", "100", "1000", "10000", "100000", "B", 1),
+    ("Matemática", "Qual é o valor de π aproximado a duas casas?", "3,12", "3,14", "3,16", "3,18", "B", 1),
+    ("Matemática", "Quanto é 15% de 200?", "20", "25", "30", "35", "C", 2),
+    ("Matemática", "Resolvendo 2x + 3 = 11, x =", "4", "5", "6", "7", "A", 2),
+    ("Matemática", "Qual é o próximo número na sequência Fibonacci: 13, 21, 34, __?", "55", "51", "47", "60", "A", 2),
+    ("Matemática", "Qual é a derivada de x²?", "1", "2x", "x", "x²", "B", 3),
+    ("Matemática", "Quanto é log₁₀(1000)?", "2", "3", "4", "5", "B", 3),
+    ("Matemática", "Quanto é o determinante da matriz [[1,2],[3,4]]?", "-2", "-1", "1", "2", "A", 4),
+    ("Matemática", "Se f(x)=x³, qual é f'(2)?", "6", "8", "12", "24", "C", 3),
+    ("Matemática", "Quanto é 8!", "40320", "362880", "5040", "4032", "A", 4),
+    ("Matemática", "Qual é o seno de 90°?", "0", "0,5", "√2/2", "1", "D", 1),
+    ("Matemática", "Qual é a integral de 1/x dx?", "ln|x| + C", "x ln|x|", "x²/2 + C", "e^x + C", "A", 4),
+    ("Matemática", "Quantos lados tem um dodecágono?", "10", "11", "12", "13", "C", 2),
+    ("Matemática", "Qual teorema relaciona catetos e hipotenusa em triângulo retângulo?", "Teorema de Tales", "Teorema de Pitágoras", "Lei dos Cossenos", "Lei dos Senos", "B", 1),
+    ("Matemática", "Qual é o inverso multiplicativo de 5 mod 7?", "2", "3", "4", "5", "B", 5),
+    ("Matemática", "Se Z = 3 + 4i, |Z| =", "5", "7", "4", "3", "A", 3),
+    ("Matemática", "Qual é o valor aproximado da constante de Euler e?", "2,71", "3,14", "1,62", "1,41", "A", 2),
+]
+
+gk_questions = [
+    ("Conhecimentos Gerais", "Qual é a capital da França?", "Madri", "Paris", "Berlim", "Roma", "B", 1),
+    ("Conhecimentos Gerais", "Qual é o maior oceano do mundo?", "Atlântico", "Índico", "Pacífico", "Ártico", "C", 1),
+    ("Conhecimentos Gerais", "Quem escreveu 'Dom Quixote'?", "Gabriel García Márquez", "Miguel de Cervantes", "Pablo Neruda", "Federico García Lorca", "B", 2),
+    ("Conhecimentos Gerais", "Qual país é conhecido como 'terra do sol nascente'?", "China", "Coreia", "Japão", "Tailândia", "C", 1),
+    ("Conhecimentos Gerais", "Qual é o animal símbolo da WWF?", "Urso panda", "Tigre", "Elefante", "Baleia", "A", 2),
+    ("Conhecimentos Gerais", "Qual é o rio mais longo do mundo?", "Nilo", "Amazonas", "Yangtzé", "Mississippi", "B", 3),
+    ("Conhecimentos Gerais", "Quem pintou Mona Lisa?", "Vincent van Gogh", "Pablo Picasso", "Leonardo da Vinci", "Claude Monet", "C", 1),
+    ("Conhecimentos Gerais", "Qual país sediou a Copa do Mundo FIFA 2014?", "Rússia", "África do Sul", "Brasil", "Alemanha", "C", 1),
+    ("Conhecimentos Gerais", "Qual é a montanha mais alta do mundo?", "K2", "Everest", "Kangchenjunga", "Lhotse", "B", 1),
+    ("Conhecimentos Gerais", "Qual é o maior deserto do mundo?", "Sahara", "Gobi", "Antártico", "Árabe", "C", 3),
+    ("Conhecimentos Gerais", "Qual é o idioma mais falado no mundo?", "Inglês", "Mandarim", "Espanhol", "Hindi", "B", 2),
+    ("Conhecimentos Gerais", "Qual planeta é conhecido como planeta vermelho?", "Vênus", "Marte", "Júpiter", "Mercúrio", "B", 1),
+    ("Conhecimentos Gerais", "Quem desenvolveu a teoria da gravitação universal?", "Galileu", "Newton", "Einstein", "Kepler", "B", 1),
+    ("Conhecimentos Gerais", "Em que continente está a Nigéria?", "Ásia", "Europa", "África", "Oceania", "C", 1),
+    ("Conhecimentos Gerais", "Qual é o símbolo químico do ouro?", "Au", "Ag", "Pt", "O", "A", 2),
+    ("Conhecimentos Gerais", "Quantos anéis tem o logotipo da Olimpíada?", "4", "5", "6", "7", "B", 1),
+    ("Conhecimentos Gerais", "Quem escreveu '1984'?", "George Orwell", "Aldous Huxley", "J. K. Rowling", "Ernest Hemingway", "A", 2),
+    ("Conhecimentos Gerais", "Qual é o maior órgão do corpo humano?", "Coração", "Fígado", "Pele", "Pulmão", "C", 2),
+    ("Conhecimentos Gerais", "Que metal é líquido em temperatura ambiente além do mercúrio?", "Césio", "Gálio", "Bromo", "Ferro", "B", 4),
+    ("Conhecimentos Gerais", "Qual país tem a bandeira com círculo vermelho em fundo branco?", "Japão", "Bangladesh", "Turquia", "Indonésia", "A", 1),
+]
+
+all_questions = science_questions + history_questions + math_questions + gk_questions
+df = pd.DataFrame(all_questions, columns=["Tema","Pergunta","AlternativaA","AlternativaB","AlternativaC","AlternativaD","Resposta","Dificuldade"])
+csv_path = "./banco_perguntas.csv"
+df.to_csv(csv_path, index=False, encoding="utf-8")
+csv_path
