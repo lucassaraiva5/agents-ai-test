@@ -1,5 +1,5 @@
-Tipo,Descrição,Quantidade
-Beneficio,Ajuda dos universitários (Eles votam na alternativa que acreditam ser a correta),1
-Beneficio,Cartas (Elimina 2 alternativas incorretas),1
-Beneficio,Pular uma questão,1
-Beneficio,Mudar a pergunta para um tema escolhido,1
+Descrição,Quantidade
+"Ajuda dos universitários",1
+"Cartas",1
+"Pular",1
+"Mudar",1

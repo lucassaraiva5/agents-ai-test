@@ -2,6 +2,8 @@ import pandas as pd
 import logging
 from dataclasses import dataclass
 from typing import List, Dict
+from pathlib import Path
+import random
 
 # ------------------------------------------------------------
 # Dependência opcional para rodar Llama‑3 localmente
@@ -11,7 +13,7 @@ try:
 except ImportError:
     Llama = None  # fallback mock
 
-DEFAULT_MODEL_PATH = "models/llama-3-8b-instruct.Q4_K_M.gguf"  # pode ser alterado via --model
+DEFAULT_MODEL_PATH = "models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"  # pode ser alterado via --model
 MODEL_CTX = 4096
 TOTAL_ROUNDS = 20  # número máximo de perguntas por partida
 
@@ -20,7 +22,6 @@ TOTAL_ROUNDS = 20  # número máximo de perguntas por partida
 # ------------------------------------------------------------
 
 def load_llm(model_path: str):
-    """Carrega o modelo se existir; caso contrário, devolve None (modo stub)."""
     if Llama is None:
         logging.warning("llama-cpp-python não instalado — respostas serão simuladas.")
         return None
@@ -29,8 +30,12 @@ def load_llm(model_path: str):
         logging.warning(f"Modelo não encontrado em '{model_path}'. Rodando em modo stub.")
         return None
 
-    return Llama(model_path=model_path, n_gpu_layers=-1, n_ctx=MODEL_CTX)
-
+    return Llama(
+        model_path=model_path,
+        n_gpu_layers=-1,
+        n_ctx=MODEL_CTX,
+        verbose=False        # <<< silencia a saída do modelo
+    )
 # ------------------------------------------------------------
 # Estruturas de dados
 # ------------------------------------------------------------
@@ -107,18 +112,83 @@ class QuestionAgent(BaseAgent):
     def __init__(self, bus: MessageBus, llm, questions: List[Question]):
         super().__init__("Questions", bus, llm)
         self.questions = {q.id: q for q in questions}
+        # Group questions by theme for random selection
+        self.questions_by_theme = {}
+        for q in questions:
+            if q.tema not in self.questions_by_theme:
+                self.questions_by_theme[q.tema] = []
+            self.questions_by_theme[q.tema].append(q)
+
+    def get_random_theme(self) -> str:
+        """Returns a random theme from available themes."""
+        return random.choice(list(self.questions_by_theme.keys()))
+
+    def format_alternatives(self, alternatives: Dict[str, str]) -> str:
+        """Format alternatives in a readable way."""
+        return "\n".join(f"{key}) {value}" for key, value in sorted(alternatives.items()))
+
+    def escape_special_chars(self, text: str) -> str:
+        """Escape special characters that might interfere with message parsing."""
+        return text.replace("{", "{{").replace("}", "}}").replace("%", "%%")
+
+    def get_question_by_strategy(self, qid: int, required_difficulty: int, required_theme: str = "") -> Question:
+        """Get a question that matches the strategy requirements."""
+        # If the question ID is 1 or 2, force difficulty to 1
+        if qid in [1, 2]:
+            required_difficulty = 1
+
+        # If theme is empty, pick a random theme
+        if not required_theme:
+            required_theme = self.get_random_theme()
+        elif required_theme == "diferente":
+            # Pick a different theme than the current question's theme
+            if qid in self.questions:
+                current_theme = self.questions[qid].tema
+                available_themes = [t for t in self.questions_by_theme.keys() if t != current_theme]
+                if available_themes:
+                    required_theme = random.choice(available_themes)
+
+        # Try to find a matching question
+        if qid in self.questions:
+            q = self.questions[qid]
+            if q.dificuldade == required_difficulty and (not required_theme or q.tema == required_theme):
+                return q
+
+        # If no matching question found, find an alternative with matching difficulty and theme
+        matching_questions = [
+            q for q in self.questions.values()
+            if q.dificuldade == required_difficulty and (not required_theme or q.tema == required_theme)
+        ]
+        
+        if matching_questions:
+            return random.choice(matching_questions)
+        
+        # If still no match, return the original question as fallback
+        return self.questions[qid]
 
     def receive(self, message: Message):
         if message.content.startswith("GET_QUESTION"):
-            _, qid = message.content.split()
-            qid = int(qid)
-            q = self.questions.get(qid)
+            parts = message.content.split()
+            qid = int(parts[1])
+            difficulty = int(parts[2])
+            theme = parts[3] if len(parts) > 3 else ""
+            
+            q = self.get_question_by_strategy(qid, difficulty, theme)
             if not q:
                 self.bus.send(self.name, message.sender, f"QUESTION_NOT_FOUND {qid}")
                 return
-            # envia somente ao solicitante (Strategy) - Strategy repassa ao Console
+            
+            # Escape special characters and format question data
+            question_text = self.escape_special_chars(q.enunciado)
+            alternatives = {k: self.escape_special_chars(v) for k, v in q.alternativas.items()}
+            alternatives_str = self.format_alternatives(alternatives)
+            
+            # Send current question info to BenefitAgent
+            self.bus.send(self.name, "Benefits", f"CURRENT_QUESTION {q.id} {q.resposta}")
+            
+            # Use a special delimiter to separate question parts
             self.bus.send(self.name, message.sender,
-                           f"QUESTION_DATA {qid} {q.enunciado} | {q.alternativas}")
+                       f"QUESTION_DATA {q.id}|||{question_text}|||{alternatives_str}")
 
         elif message.content.startswith("CHECK_ANSWER"):
             _, qid, guess = message.content.split()
@@ -128,7 +198,6 @@ class QuestionAgent(BaseAgent):
                 self.bus.send(self.name, message.sender, f"QUESTION_NOT_FOUND {qid}")
                 return
             result_str = "CORRECT" if guess.upper() == q.resposta.upper() else "WRONG"
-            # envia resultado ao Console (feedback) e ao Strategy (fluxo do jogo)
             self.bus.broadcast(
                 self.name,
                 ["Console", "Strategy"],
@@ -142,39 +211,122 @@ class BenefitAgent(BaseAgent):
     def __init__(self, bus: MessageBus, llm, benefits: Dict[str, Benefit]):
         super().__init__("Benefits", bus, llm)
         self.benefits = benefits
+        self.benefit_descriptions = {
+            "Ajuda dos universitários": "Eles votam na alternativa que acreditam ser a correta",
+            "Cartas": "Elimina 2 alternativas incorretas",
+            "Pular": "Pular uma questão",
+            "Mudar": "Mudar a pergunta para um tema escolhido"
+        }
+        self.current_question = None
+        self.current_answer = None
+
+    def _simulate_university_help(self) -> str:
+        """Simula a ajuda dos universitários."""
+        if not self.current_answer:
+            return "Desculpe, não tenho a resposta para ajudar!"
+        
+        # 70% chance de acertar
+        if random.random() < 0.7:
+            correct = self.current_answer
+            # Distribuir votos com maior peso para a resposta correta
+            votes = {
+                correct: random.randint(45, 60),
+                self._get_random_wrong_alternative(): random.randint(15, 25),
+                self._get_random_wrong_alternative(): random.randint(10, 20),
+                self._get_random_wrong_alternative(): random.randint(5, 15)
+            }
+        else:
+            # 30% chance de errar - distribuir votos aleatoriamente
+            alternatives = ['A', 'B', 'C', 'D']
+            votes = {alt: random.randint(10, 40) for alt in alternatives}
+        
+        # Formatar resultado
+        result = "\nVotação dos universitários:\n"
+        for alt, vote in sorted(votes.items()):
+            result += f"{alt}: {vote}%\n"
+        return result
+
+    def _get_random_wrong_alternative(self) -> str:
+        """Retorna uma alternativa errada aleatória."""
+        alternatives = ['A', 'B', 'C', 'D']
+        wrong_alternatives = [alt for alt in alternatives if alt != self.current_answer]
+        return random.choice(wrong_alternatives)
+
+    def _eliminate_wrong_alternatives(self) -> str:
+        """Elimina duas alternativas erradas."""
+        if not self.current_answer:
+            return "Desculpe, não tenho a resposta para ajudar!"
+        
+        alternatives = ['A', 'B', 'C', 'D']
+        wrong_alternatives = [alt for alt in alternatives if alt != self.current_answer]
+        eliminated = random.sample(wrong_alternatives, 2)
+        
+        result = "\nAlternativas eliminadas:\n"
+        for alt in sorted(eliminated):
+            result += f"{alt}\n"
+        return result
 
     def receive(self, message: Message):
         if message.content == "GET_AVAILABLE_BENEFITS":
             data = {k: v.quantidade for k, v in self.benefits.items() if v.quantidade > 0}
             self.bus.send(self.name, message.sender, f"AVAILABLE_BENEFITS {data}")
 
+        elif message.content.startswith("CURRENT_QUESTION"):
+            _, qid, answer = message.content.split()
+            self.current_question = qid
+            self.current_answer = answer
+
         elif message.content.startswith("USE_BENEFIT"):
             _, key = message.content.split(None, 1)
-            b = self.benefits.get(key)
+            # Extract just the benefit name without the description
+            benefit_key = key.split(" (")[0] if " (" in key else key
+            b = self.benefits.get(benefit_key)
+            
             if b and b.quantidade > 0:
                 b.quantidade -= 1
-                self.bus.send(self.name, message.sender, f"BENEFIT_USED {key} {b.quantidade}")
+                description = self.benefit_descriptions.get(benefit_key, "")
+                
+                # Implementar o efeito de cada benefício
+                effect = ""
+                if benefit_key == "Ajuda dos universitários":
+                    effect = self._simulate_university_help()
+                elif benefit_key == "Cartas":
+                    effect = self._eliminate_wrong_alternatives()
+                
+                self.bus.send(self.name, message.sender, 
+                            f"BENEFIT_USED {benefit_key} ({description}) {b.quantidade}\n{effect}")
             else:
-                self.bus.send(self.name, message.sender, f"BENEFIT_NOT_AVAILABLE {key}")
+                self.bus.send(self.name, message.sender, f"BENEFIT_NOT_AVAILABLE {benefit_key}")
 
 # ------------------------------------------------------------
 # Agente de Estratégia (ordem definida por CSV)
 # ------------------------------------------------------------
 class StrategyAgent(BaseAgent):
-    def __init__(self, bus: MessageBus, llm, sequence: List[int]):
+    def __init__(self, bus: MessageBus, llm, sequence: List[Dict[str, any]]):
         super().__init__("Strategy", bus, llm)
         self.sequence = sequence
         self.idx = 0
         self.score = 0
         self.used_benefits: List[str] = []
+        self.game_over = False
 
     def start(self):
         if not self.sequence:
             self.bus.send(self.name, "Console", "GAME_OVER Sequência vazia")
             return
-        self.bus.send(self.name, "Questions", f"GET_QUESTION {self.sequence[0]}")
+        current = self.sequence[0]
+        self.bus.send(
+            self.name, 
+            "Questions", 
+            f"GET_QUESTION {current['id']} {current['difficulty']} {current['theme']}"
+        )
 
     def receive(self, message: Message):
+        if message.content == "GAME_OVER":
+            self.game_over = True
+            self.bus.send(self.name, "Console", f"GAME_OVER Score final: {self.score}/{len(self.sequence)}")
+            return
+
         if message.content.startswith("QUESTION_DATA"):
             # repassa apenas para o Console
             self.bus.send(self.name, "Console", message.content)
@@ -183,17 +335,51 @@ class StrategyAgent(BaseAgent):
             _, qid, result, correct = message.content.split()
             if result == "CORRECT":
                 self.score += 1
+                # próxima pergunta
+                self.idx += 1
+                if self.idx < len(self.sequence) and not self.game_over:
+                    current = self.sequence[self.idx]
+                    self.bus.send(
+                        self.name, 
+                        "Questions", 
+                        f"GET_QUESTION {current['id']} {current['difficulty']} {current['theme']}"
+                    )
+                elif self.idx >= len(self.sequence):
+                    # Only end if we've completed all questions
+                    self.game_over = True
+                    self.bus.send(self.name, "Console", f"GAME_OVER Score final: {self.score}/{len(self.sequence)}")
             else:
-                if "Cartas" not in self.used_benefits:
-                    self.used_benefits.append("Cartas")
-                    self.bus.send(self.name, "Benefits", "USE_BENEFIT Cartas (Elimina 2 alternativas incorretas)")
+                # Game over on wrong answer
+                self.game_over = True
+                self.bus.send(self.name, "Console", f"GAME_OVER Score final: {self.score}/{len(self.sequence)}")
 
-            # próxima pergunta
-            self.idx += 1
-            if self.idx < len(self.sequence):
-                self.bus.send(self.name, "Questions", f"GET_QUESTION {self.sequence[self.idx]}")
-            else:
-                self.bus.send(self.name, "Console", f"GAME_OVER Score: {self.score}/{len(self.sequence)}")
+        elif message.content.startswith("BENEFIT_USED"):
+            _, benefit = message.content.split(" ", 1)
+            benefit_key = benefit.split(" ")[0]  # Get just the first word of the benefit
+            if benefit_key not in self.used_benefits:
+                self.used_benefits.append(benefit_key)
+                # Handle specific benefits
+                if benefit_key == "Pular":
+                    self.idx += 1
+                    if self.idx < len(self.sequence):
+                        current = self.sequence[self.idx]
+                        self.bus.send(
+                            self.name, 
+                            "Questions", 
+                            f"GET_QUESTION {current['id']} {current['difficulty']} {current['theme']}"
+                        )
+                    else:
+                        self.game_over = True
+                        self.bus.send(self.name, "Console", f"GAME_OVER Score final: {self.score}/{len(self.sequence)}")
+                elif benefit_key == "Mudar":
+                    # Stay on same question but request a new one with different theme
+                    if self.idx < len(self.sequence):
+                        current = self.sequence[self.idx]
+                        self.bus.send(
+                            self.name, 
+                            "Questions", 
+                            f"GET_QUESTION {current['id']} {current['difficulty']} diferente"
+                        )
 
 # ------------------------------------------------------------
 # Agente Console (CLI)
@@ -201,17 +387,135 @@ class StrategyAgent(BaseAgent):
 class ConsoleAgent(BaseAgent):
     def __init__(self, bus: MessageBus):
         super().__init__("Console", bus, None)
+        self.current_question_id = None
+        self.waiting_for_answer = False
+        self.available_benefits = {}
+        self._pending_question = None  # guarda a pergunta até receber benefícios
+        self.all_benefits = {
+            "Ajuda dos universitários": "Eles votam na alternativa que acreditam ser a correta",
+            "Cartas": "Elimina 2 alternativas incorretas",
+            "Pular": "Pular uma questão",
+            "Mudar": "Mudar a pergunta para um tema escolhido"
+        }
+
+    def format_benefit_menu(self):
+        """Formata o menu de benefícios mostrando todos, mas indicando quais estão disponíveis."""
+        menu = ["\nBenefícios disponíveis:", "-" * 30, "0. Responder normalmente"]
+        
+        # Map benefit names to their menu index for consistent ordering
+        benefit_order = {
+            "Ajuda dos universitários": 1,
+            "Cartas": 2,
+            "Pular": 3,
+            "Mudar": 4
+        }
+        
+        # Create menu items
+        menu_items = []
+        for benefit_name, description in self.all_benefits.items():
+            idx = benefit_order[benefit_name]
+            qty = self.available_benefits.get(benefit_name, 0)
+            status = f"(Quantidade: {qty})" if qty > 0 else "(Indisponível)"
+            menu_items.append((idx, f"{idx}. {benefit_name} {status}"))
+        
+        # Add sorted menu items
+        menu.extend(item[1] for item in sorted(menu_items))
+        return menu
+
+    def ask_for_answer(self):
+        if self.current_question_id and self.waiting_for_answer:
+            resp = input("\nSua resposta (A/B/C/D): ").strip().upper()
+            if resp in ['A', 'B', 'C', 'D']:
+                self.waiting_for_answer = False
+                self.bus.send("Console", "Questions",
+                              f"CHECK_ANSWER {self.current_question_id} {resp}")
+            else:
+                print("Por favor, digite A, B, C ou D")
+                self.ask_for_answer()
 
     def receive(self, message: Message):
+        # ----- chegou a pergunta: apenas armazena -----
         if message.content.startswith("QUESTION_DATA"):
-            _, qid, texto, alts = message.content.split(" ", 3)
-            print(f"\nPergunta {qid}: {texto}")
-            print(alts)
-            resp = input("Sua resposta (A/B/C/D): ")
-            self.bus.send("Console", "Questions", f"CHECK_ANSWER {qid} {resp.strip()}")
-        elif message.content.startswith("ANSWER_RESULT"):
+            parts = message.content.split("|||")
+            if len(parts) >= 3:
+                header, q_text, alt_text = parts[0], parts[1], parts[2]
+                qid = header.split()[1]
+
+                self.current_question_id = qid
+                self._pending_question = (qid, q_text, alt_text)
+                self.bus.send("Console", "Benefits", "GET_AVAILABLE_BENEFITS")
+            return
+
+        # ----- chegaram os benefícios: mostra tudo -----
+        if message.content.startswith("AVAILABLE_BENEFITS"):
+            benefits_data = message.content.split(" ", 1)[1]
+            self.available_benefits = eval(benefits_data)
+
+            if self._pending_question:
+                qid, q_text, alt_text = self._pending_question
+                print(f"\nPergunta {qid}:")
+                print("=" * 40)
+                print(q_text)
+                print("=" * 40)
+                print(alt_text)
+                self._pending_question = None
+
+            # Display formatted benefit menu
+            for line in self.format_benefit_menu():
+                print(line)
+
+            choice = input("\nEscolha um benefício (0-4): ").strip()
+            if choice == "1" and "Ajuda dos universitários" in self.available_benefits:
+                self.bus.send("Console", "Benefits", "USE_BENEFIT Ajuda dos universitários")
+            elif choice == "2" and "Cartas" in self.available_benefits:
+                self.bus.send("Console", "Benefits", "USE_BENEFIT Cartas")
+            elif choice == "3" and "Pular" in self.available_benefits:
+                self.bus.send("Console", "Benefits", "USE_BENEFIT Pular")
+            elif choice == "4" and "Mudar" in self.available_benefits:
+                self.bus.send("Console", "Benefits", "USE_BENEFIT Mudar")
+            elif choice == "0":
+                self.waiting_for_answer = True
+                self.ask_for_answer()
+            else:
+                print("Opção inválida ou benefício não disponível!")
+                self.waiting_for_answer = True
+                self.ask_for_answer()
+            return
+
+        # ----- resto inalterado -----
+        if message.content.startswith("ANSWER_RESULT"):
             _, qid, result, correct = message.content.split()
-            print(f"Resultado da pergunta {qid}: {result}. Resposta correta: {correct}")
+            print(f"\nResultado da pergunta {qid}: {result}")
+            print(f"Resposta correta: {correct}")
+            if result == "WRONG":
+                print("\nGame Over! Você errou uma questão.")
+                self.bus.send("Console", "Strategy", "GAME_OVER")
+
+        elif message.content.startswith("BENEFIT_USED"):
+            # Split message into parts
+            parts = message.content.split("\n", 1)
+            header = parts[0]
+            effect = parts[1] if len(parts) > 1 else ""
+            
+            # Extract benefit name and description
+            benefit_info = header.split(" ", 2)
+            benefit_name = benefit_info[1]
+            
+            # Display benefit usage and effect
+            print(f"\nBenefício '{benefit_name}' usado!")
+            if effect:
+                print(effect)
+            
+            # Ask for answer if not using Pular or Mudar
+            if not benefit_name.startswith(("Pular", "Mudar")):
+                self.waiting_for_answer = True
+                self.ask_for_answer()
+
+        elif message.content.startswith("BENEFIT_NOT_AVAILABLE"):
+            print("\nEste benefício não está mais disponível!")
+            self.waiting_for_answer = True
+            self.ask_for_answer()
+
         else:
             print(f"[INFO] {message.content}")
 
@@ -260,16 +564,25 @@ def load_questions(csv_path: str) -> List[Question]:
 
 def load_benefits(csv_path: str) -> Dict[str, Benefit]:
     df = pd.read_csv(csv_path)
-    return {row["Descrição"]: Benefit(row["Descrição"], int(row["Quantidade"])) for _, row in df.iterrows()}
+    return {
+        row["Descrição"]: Benefit(row["Descrição"], int(row["Quantidade"]))
+        for _, row in df.iterrows()
+    }
 
 
-def load_strategy(csv_path: str) -> List[int]:
+def load_strategy(csv_path: str) -> List[Dict[str, any]]:
     df = pd.read_csv(csv_path)
-    sequence: List[int] = []
+    sequence = []
     for _, row in df.iterrows():
+        difficulty = int(row["Dificuldade"])
+        theme = str(row["Tema"]).strip() if pd.notna(row["Tema"]) else ""
         for part in str(row["Pergunta"]).split(','):
             if part.strip():
-                sequence.append(int(part.strip()))
+                sequence.append({
+                    "id": int(part.strip()),
+                    "difficulty": difficulty,
+                    "theme": theme
+                })
     return sequence
 
 # ------------------------------------------------------------
@@ -279,7 +592,7 @@ def load_strategy(csv_path: str) -> List[int]:
 def main(questions_csv: str, benefits_csv: str, strategy_csv: str):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    llm = load_llm("/home/lucassaraiva5/models/llama-3-8b-instruct.Q4_K_M.gguf")
+    llm = load_llm("/home/lucassaraiva5/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf")
     bus = MessageBus()
 
     # Instancia agentes
